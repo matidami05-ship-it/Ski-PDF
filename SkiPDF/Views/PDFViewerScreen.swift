@@ -10,7 +10,15 @@ struct PDFViewerScreen: View {
     var initialPassword: String? = nil
 
     @Environment(\.dismiss) var dismiss
-    @StateObject private var model = PDFViewerModel()
+    @StateObject private var model: PDFViewerModel
+
+    init(url: URL, saveAsNew: Bool = false, initialPassword: String? = nil) {
+        self.url = url
+        self.saveAsNew = saveAsNew
+        self.initialPassword = initialPassword
+        // Load right away so the first frame already has the document.
+        _model = StateObject(wrappedValue: PDFViewerModel(url: url, password: initialPassword))
+    }
     @State private var searchText = ""
     @State private var showSearch = false
     @State private var showGoTo = false
@@ -126,7 +134,6 @@ struct PDFViewerScreen: View {
                 Button("OK", role: .cancel) {}
             }
         }
-        .onAppear { model.load(url, password: initialPassword) }
     }
 }
 
@@ -158,28 +165,43 @@ final class PDFViewerModel: ObservableObject {
     @Published var matchIndex = 0
     @Published var searched = false
 
-    weak var pdfView: PDFView?
+    /// One PDF view for the screen, shared by the page view and the thumbnail strip.
+    let pdfView: SizingPDFView = {
+        let v = SizingPDFView()
+        v.backgroundColor = UIColor(Theme.background)
+        v.pageShadowsEnabled = true
+        v.displayDirection = .vertical
+        return v
+    }()
+
+    init(url: URL, password: String?) {
+        load(url, password: password)
+    }
     private var password: String?
     private var observers: [NSObjectProtocol] = []
 
     func load(_ url: URL, password: String?) {
         guard document == nil else { return }
         title = url.deletingPathExtension().lastPathComponent
-        guard let d = PDFDocument(url: url) else { failed = true; return }
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        // Read the bytes first: PDFDocument(url:) can fail silently on some file locations.
+        guard let data = try? Data(contentsOf: url), let d = PDFDocument(data: data) ?? PDFDocument(url: url) else { failed = true; return }
         if d.isLocked, let pw = password { _ = d.unlock(withPassword: pw); self.password = pw }
         document = d
-        observers.append(NotificationCenter.default.addObserver(forName: .PDFViewPageChanged, object: nil, queue: .main) { [weak self] _ in
+        if !d.isLocked { pdfView.document = d }
+        observers.append(NotificationCenter.default.addObserver(forName: .PDFViewPageChanged, object: pdfView, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.updatePageLabel() }
         })
         // Typing in form fields counts as an edit.
-        observers.append(NotificationCenter.default.addObserver(forName: .PDFViewAnnotationHit, object: nil, queue: .main) { [weak self] _ in
+        observers.append(NotificationCenter.default.addObserver(forName: .PDFViewAnnotationHit, object: pdfView, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.dirty = true }
         })
         observers.append(NotificationCenter.default.addObserver(forName: UITextField.textDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in if self?.pdfView != nil { self?.dirty = true } }
+            Task { @MainActor in self?.dirty = true }
         })
         observers.append(NotificationCenter.default.addObserver(forName: UITextView.textDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in if self?.pdfView != nil { self?.dirty = true } }
+            Task { @MainActor in self?.dirty = true }
         })
     }
 
@@ -190,6 +212,8 @@ final class PDFViewerModel: ObservableObject {
         if d.unlock(withPassword: pw) {
             password = pw
             wrongPassword = false
+            pdfView.document = d
+            pdfView.fitToWidth()
             objectWillChange.send()
             return true
         }
@@ -197,30 +221,29 @@ final class PDFViewerModel: ObservableObject {
         return false
     }
 
-    func attach(_ view: PDFView) {
-        pdfView = view
+    func attach() {
         applyLayout()
         updatePageLabel()
     }
 
     func applyLayout() {
-        guard let v = pdfView else { return }
+        let v = pdfView
         switch layout {
         case .scroll: v.displayMode = .singlePageContinuous; v.displaysAsBook = false
         case .single: v.displayMode = .singlePage; v.displaysAsBook = false
         case .twoUp: v.displayMode = .twoUpContinuous; v.displaysAsBook = true
         }
-        v.autoScales = true
+        v.fitToWidth()
     }
 
     func updatePageLabel() {
-        guard let v = pdfView, let d = document, let p = v.currentPage else { return }
+        guard let d = document, let p = pdfView.currentPage else { return }
         pageLabel = "\(d.index(for: p) + 1) / \(d.pageCount)"
     }
 
     func go(to index: Int) {
         guard let d = document, let p = d.page(at: max(0, min(d.pageCount - 1, index))) else { return }
-        pdfView?.go(to: p)
+        pdfView.go(to: p)
     }
 
     func search(_ text: String) {
@@ -230,7 +253,7 @@ final class PDFViewerModel: ObservableObject {
         matches = q.isEmpty ? [] : d.findString(q, withOptions: [.caseInsensitive, .diacriticInsensitive])
         matchIndex = 0
         for m in matches { m.color = UIColor.systemYellow.withAlphaComponent(0.5) }
-        pdfView?.highlightedSelections = matches
+        pdfView.highlightedSelections = matches
         if let first = matches.first { show(first) }
     }
 
@@ -241,12 +264,12 @@ final class PDFViewerModel: ObservableObject {
     }
 
     private func show(_ s: PDFSelection) {
-        pdfView?.setCurrentSelection(s, animate: true)
-        pdfView?.go(to: s)
+        pdfView.setCurrentSelection(s, animate: true)
+        pdfView.go(to: s)
     }
 
     func markup(_ type: PDFAnnotationSubtype) {
-        guard let sel = pdfView?.currentSelection, !(sel.string ?? "").isEmpty else {
+        guard let sel = pdfView.currentSelection, !(sel.string ?? "").isEmpty else {
             message = "Select some text first (press and hold on a word, then drag the handles)."
             return
         }
@@ -262,12 +285,12 @@ final class PDFViewerModel: ObservableObject {
                 page.addAnnotation(a)
             }
         }
-        pdfView?.clearSelection()
+        pdfView.clearSelection()
         dirty = true
     }
 
     func removeMarkupUnderSelection() {
-        guard let v = pdfView else { return }
+        let v = pdfView
         let kinds: Set<String> = ["Highlight", "Underline", "StrikeOut", "Text", "FreeText"]
         var removed = 0
         if let sel = v.currentSelection {
@@ -283,7 +306,8 @@ final class PDFViewerModel: ObservableObject {
     }
 
     func addNote(_ text: String) {
-        guard let v = pdfView, let page = v.currentPage, !text.isEmpty else { return }
+        let v = pdfView
+        guard let page = v.currentPage, !text.isEmpty else { return }
         let pb = page.bounds(for: .cropBox)
         // Place it near the middle of what's on screen.
         let center = v.convert(CGPoint(x: v.bounds.midX, y: v.bounds.midY), to: page)
@@ -343,19 +367,39 @@ final class PDFViewerModel: ObservableObject {
 struct PDFKitView: UIViewRepresentable {
     @ObservedObject var model: PDFViewerModel
 
-    func makeUIView(context: Context) -> PDFView {
-        let v = PDFView()
-        v.backgroundColor = UIColor(Theme.background)
-        v.document = model.document
-        v.autoScales = true
-        v.pageShadowsEnabled = true
-        v.usePageViewController(false)
-        model.attach(v)
+    func makeUIView(context: Context) -> SizingPDFView {
+        let v = model.pdfView
+        if v.document == nil, let d = model.document, !d.isLocked { v.document = d }
+        model.attach()
         return v
     }
 
-    func updateUIView(_ v: PDFView, context: Context) {
-        if v.document !== model.document { v.document = model.document }
+    func updateUIView(_ v: SizingPDFView, context: Context) {
+        if let d = model.document, !d.isLocked, v.document !== d { v.document = d; v.fitToWidth() }
+    }
+}
+
+/// A PDFView that re-fits the page whenever it gets a real size (PDFKit can't fit a zero-sized view,
+/// which otherwise leaves the pages invisible).
+final class SizingPDFView: PDFView {
+    private var lastSize: CGSize = .zero
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        guard bounds.width > 1, bounds.height > 1, bounds.size != lastSize else { return }
+        lastSize = bounds.size
+        fitToWidth() // first layout, rotation, split view
+    }
+
+    func fitToWidth() {
+        guard document != nil, bounds.width > 1 else { return }
+        autoScales = true
+        let fit = scaleFactorForSizeToFit
+        if fit > 0 {
+            minScaleFactor = fit * 0.5
+            maxScaleFactor = max(fit * 8, 4)
+            scaleFactor = fit
+        }
     }
 }
 
@@ -369,15 +413,13 @@ struct ThumbnailStrip: UIViewRepresentable {
         t.pdfView = model.pdfView
         return t
     }
-    func updateUIView(_ t: PDFThumbnailView, context: Context) {
-        if t.pdfView !== model.pdfView { t.pdfView = model.pdfView }
-    }
+    func updateUIView(_ t: PDFThumbnailView, context: Context) {}
 }
 
 /// View PDF tool: pick any PDF and open it in the reader.
 struct ViewPDFTool: View {
     @State private var pdf: PickedPDF?
-    @State private var open = false
+    @State private var opened: PickedPDF?
     var body: some View {
         ScrollView {
             VStack(spacing: 16) {
@@ -385,14 +427,14 @@ struct ViewPDFTool: View {
                     .font(.subheadline).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
                 PDFPicker(allowLocked: true) { picked in
                     pdf = picked.first
-                    open = pdf != nil
+                    opened = picked.first
                 }
             }
             .padding(16)
         }
         .toolBackground()
-        .fullScreenCover(isPresented: $open) {
-            if let p = pdf { PDFViewerScreen(url: p.url, saveAsNew: true, initialPassword: p.password) }
+        .fullScreenCover(item: $opened) { p in
+            PDFViewerScreen(url: p.url, saveAsNew: true, initialPassword: p.password)
         }
     }
 }
