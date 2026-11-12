@@ -27,7 +27,7 @@ targets:
         NSPhotoLibraryAddUsageDescription: Ski PDF saves converted and edited images to your photo library.
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
-                CFBundleDocumentTypes:
+        CFBundleDocumentTypes:
           - CFBundleTypeName: PDF Document
             CFBundleTypeRole: Editor
             LSHandlerRank: Alternate
