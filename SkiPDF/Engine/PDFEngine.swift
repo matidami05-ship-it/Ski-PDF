@@ -202,13 +202,26 @@ enum PDFEngine {
 
     static func locked(_ doc: PDFDocument, userPassword: String, ownerPassword: String?, allowPrinting: Bool, allowCopying: Bool) throws -> URL {
         let tmp = Scratch.url("locked.pdf")
-        var opts: [PDFDocumentWriteOption: Any] = [.userPasswordOption: userPassword,
-                                                   .ownerPasswordOption: (ownerPassword?.isEmpty == false ? ownerPassword! : userPassword)]
-        var perms: PDFAccessPermissions = [.allowsContentAccessibility]
-        if allowPrinting { perms.insert(.allowsLowQualityPrinting); perms.insert(.allowsHighQualityPrinting) }
-        if allowCopying { perms.insert(.allowsContentCopying) }
-        opts[.accessPermissionsOption] = perms.rawValue
-        guard doc.write(to: tmp, withOptions: opts) else { throw ToolError("Couldn't lock this PDF.") }
+        let owner = (ownerPassword?.isEmpty == false) ? ownerPassword! : userPassword
+        if allowPrinting && allowCopying {
+            let opts: [PDFDocumentWriteOption: Any] = [.userPasswordOption: userPassword, .ownerPasswordOption: owner]
+            guard doc.write(to: tmp, withOptions: opts) else { throw ToolError("Couldn't lock this PDF.") }
+            return tmp
+        }
+        // Restrictions need Core Graphics: redraw the pages into an encrypted PDF.
+        var info = pdfInfo(doc)
+        info[kCGPDFContextUserPassword as String] = userPassword
+        info[kCGPDFContextOwnerPassword as String] = owner
+        info[kCGPDFContextAllowsPrinting as String] = allowPrinting
+        info[kCGPDFContextAllowsCopying as String] = allowCopying
+        guard UIGraphicsBeginPDFContextToFile(tmp.path, .zero, info) else { throw ToolError("Couldn't lock this PDF.") }
+        for i in 0..<doc.pageCount {
+            guard let page = doc.page(at: i) else { continue }
+            let size = displaySize(page)
+            UIGraphicsBeginPDFPageWithInfo(CGRect(origin: .zero, size: size), nil)
+            if let cg = UIGraphicsGetCurrentContext() { drawPage(page, in: CGRect(origin: .zero, size: size), context: cg) }
+        }
+        UIGraphicsEndPDFContext()
         return tmp
     }
 
