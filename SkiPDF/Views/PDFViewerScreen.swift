@@ -421,7 +421,7 @@ final class SizingPDFView: PDFView {
         super.init(frame: frame)
         let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
         tap.cancelsTouchesInView = false
-        tap.delegate = self
+        tap.delegate = SimultaneousTapDelegate.shared
         addGestureRecognizer(tap)
     }
 
@@ -468,7 +468,9 @@ final class SizingPDFView: PDFView {
     }
 }
 
-extension SizingPDFView: UIGestureRecognizerDelegate {
+/// Lets the "show/hide bars" tap work alongside PDFKit's own gestures.
+private final class SimultaneousTapDelegate: NSObject, UIGestureRecognizerDelegate {
+    static let shared = SimultaneousTapDelegate()
     func gestureRecognizer(_ g: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
 }
 
