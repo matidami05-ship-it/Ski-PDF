@@ -1,0 +1,64 @@
+name: SkiPDF
+options:
+  bundleIdPrefix: com.skistudio
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    TARGETED_DEVICE_FAMILY: "1,2"
+    DEVELOPMENT_TEAM: ""
+targets:
+  SkiPDF:
+    type: application
+    platform: iOS
+    sources:
+      - path: SkiPDF
+    info:
+      path: SkiPDF/Info.plist
+      properties:
+        CFBundleDisplayName: Ski PDF
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        NSCameraUsageDescription: Ski PDF uses the camera to scan paper documents into PDFs.
+        NSPhotoLibraryAddUsageDescription: Ski PDF saves converted and edited images to your photo library.
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: false
+        UISupportsDocumentBrowser: false
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: PDF Document
+            CFBundleTypeRole: Editor
+            LSHandlerRank: Alternate
+            LSItemContentTypes: [com.adobe.pdf]
+          - CFBundleTypeName: Image
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Alternate
+            LSItemContentTypes: [public.image]
+          - CFBundleTypeName: Document
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Alternate
+            LSItemContentTypes:
+              - org.openxmlformats.wordprocessingml.document
+              - com.microsoft.word.doc
+              - org.openxmlformats.spreadsheetml.sheet
+              - com.microsoft.excel.xls
+              - org.openxmlformats.presentationml.presentation
+              - com.microsoft.powerpoint.ppt
+              - public.rtf
+              - public.html
+              - public.plain-text
+        UILaunchScreen:
+          UIColorName: LaunchColor
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        UISupportedInterfaceOrientations~ipad: [UIInterfaceOrientationPortrait, UIInterfaceOrientationPortraitUpsideDown, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        UIUserInterfaceStyle: Dark
+        ITSAppUsesNonExemptEncryption: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.skistudio.pdf
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+    scheme: {}

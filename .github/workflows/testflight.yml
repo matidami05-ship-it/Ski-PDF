@@ -1,0 +1,182 @@
+name: TestFlight
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: testflight
+  cancel-in-progress: true
+
+jobs:
+  testflight:
+    runs-on: macos-15
+    env:
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+      ASC_KEY_CONTENT: ${{ secrets.ASC_KEY_CONTENT }}
+      TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+    steps:
+      - name: Check signing secrets
+        id: check
+        run: |
+          missing=""
+          for v in ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_CONTENT TEAM_ID; do
+            [ -z "${!v}" ] && missing="$missing $v"
+          done
+          if [ -n "$missing" ]; then
+            echo "::warning::TestFlight skipped — missing secrets:$missing"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.check.outputs.skip != 'true'
+
+      - name: Pick newest Xcode
+        if: steps.check.outputs.skip != 'true'
+        run: sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)"
+
+      - name: Generate Xcode project
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          brew install xcodegen
+          xcodegen generate
+
+      - name: Write API key
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          # Trim stray spaces/newlines pasted into the ID secrets.
+          ASC_KEY_ID=$(printf '%s' "$ASC_KEY_ID" | tr -d '[:space:]')
+          ASC_ISSUER_ID=$(printf '%s' "$ASC_ISSUER_ID" | tr -d '[:space:]')
+          TEAM_ID=$(printf '%s' "$TEAM_ID" | tr -d '[:space:]')
+          { echo "ASC_KEY_ID=$ASC_KEY_ID"; echo "ASC_ISSUER_ID=$ASC_ISSUER_ID"; echo "TEAM_ID=$TEAM_ID"; } >> "$GITHUB_ENV"
+          # Report the shape of each ID (never the values) to spot mix-ups.
+          ok=1
+          [[ "$ASC_KEY_ID" =~ ^[A-Z0-9]{10}$ ]] || { echo "::error::ASC_KEY_ID should be 10 letters/numbers (it's ${#ASC_KEY_ID} characters). Use the Key ID shown next to the key, which also appears in the file name AuthKey_<KeyID>.p8."; ok=0; }
+          [[ "$ASC_ISSUER_ID" =~ ^[0-9a-fA-F-]{36}$ ]] || { echo "::error::ASC_ISSUER_ID should look like 69a6de7e-xxxx-xxxx-xxxx-xxxxxxxxxxxx (36 characters; it's ${#ASC_ISSUER_ID}). It's shown above the Team Keys list."; ok=0; }
+          [[ "$TEAM_ID" =~ ^[A-Z0-9]{10}$ ]] || { echo "::error::APPLE_TEAM_ID should be 10 letters/numbers (it's ${#TEAM_ID} characters)."; ok=0; }
+          [ "$ok" = 1 ] && echo "::notice::ID formats look right (Key ID 10, Issuer ID 36, Team ID 10)."
+          mkdir -p "$RUNNER_TEMP/keys"
+          # Split the secret into key blocks (it may hold more than one key if
+          # several .p8 files were copied at once) and rebuild each as clean PEM.
+          printf '%s' "$ASC_KEY_CONTENT" | tr -d '\r' > "$RUNNER_TEMP/raw.txt"
+          python3 - "$RUNNER_TEMP/raw.txt" "$RUNNER_TEMP/keys" <<'PY'
+          import re, sys, textwrap
+          raw = open(sys.argv[1]).read()
+          parts = re.split(r"-----BEGIN [A-Z ]*-----", raw)
+          bodies = []
+          for p in parts:
+              body = re.sub(r"-----END [A-Z ]*-----.*", "", p, flags=re.S)
+              body = re.sub(r"[^A-Za-z0-9+/=]", "", body)
+              if len(body) > 100:
+                  bodies.append(body)
+          for i, body in enumerate(bodies):
+              with open(f"{sys.argv[2]}/candidate{i}.pem", "w") as f:
+                  f.write("-----BEGIN PRIVATE KEY-----\n" + "\n".join(textwrap.wrap(body, 64)) + "\n-----END PRIVATE KEY-----\n")
+          print(f"Found {len(bodies)} key(s) in ASC_KEY_CONTENT")
+          PY
+          n=0
+          for c in "$RUNNER_TEMP"/keys/candidate*.pem; do
+            [ -f "$c" ] || continue
+            if openssl pkey -in "$c" -out "$c.tmp" 2>/dev/null && openssl pkcs8 -topk8 -nocrypt -in "$c.tmp" -out "$c" 2>/dev/null; then
+              n=$((n+1))
+            else
+              rm -f "$c"
+            fi
+            rm -f "$c.tmp"
+          done
+          if [ "$n" = 0 ]; then
+            echo "::error::ASC_KEY_CONTENT doesn't contain a valid private key. Re-copy the .p8 file text into the secret."
+            exit 1
+          fi
+          [ "$n" -gt 1 ] && echo "::notice::ASC_KEY_CONTENT contains $n keys — will use the one that matches the Key ID."
+          echo "KEYS_DIR=$RUNNER_TEMP/keys" >> "$GITHUB_ENV"
+
+      - name: Test API key with Apple
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          cat > "$RUNNER_TEMP/jwt.rb" <<'RUBY'
+          require "openssl"; require "base64"; require "json"; require "net/http"
+          def b64(s) Base64.urlsafe_encode64(s, padding: false) end
+          key = OpenSSL::PKey::EC.new(File.read(ENV["KEY_PATH"]))
+          now = Time.now.to_i
+          header = { alg: "ES256", kid: ENV["ASC_KEY_ID"], typ: "JWT" }
+          payload = { iss: ENV["ASC_ISSUER_ID"], iat: now, exp: now + 600, aud: "appstoreconnect-v1" }
+          input = b64(header.to_json) + "." + b64(payload.to_json)
+          der = key.sign(OpenSSL::Digest::SHA256.new, input)
+          asn = OpenSSL::ASN1.decode(der)
+          raw = asn.value.map { |i| i.value.to_s(2).rjust(32, "\x00") }.join
+          jwt = input + "." + b64(raw)
+          uri = URI("https://api.appstoreconnect.apple.com/v1/apps?limit=1")
+          req = Net::HTTP::Get.new(uri); req["Authorization"] = "Bearer #{jwt}"
+          res = Net::HTTP.start(uri.host, uri.port, use_ssl: true) { |h| h.request(req) }
+          puts "Apple API status: #{res.code}"
+          case res.code
+          when "200" then puts "::notice::API key works with App Store Connect."
+          when "401" then puts "Apple rejected this key (401)."
+          when "403" then puts "::error::The key works but doesn't have enough access (403). Create a Team Key with Admin access."
+          else puts "::error::Unexpected answer from Apple (#{res.code}): #{res.body[0, 300]}"
+          end
+          exit(res.code == "200" ? 0 : 1)
+          RUBY
+          # Your account's Issuer ID (the same for every key; from Ski Radio's working setup).
+          KNOWN_ISSUER=0c392542-62b7-44e7-8f0e-800ec8ba3988
+          for iss in "$ASC_ISSUER_ID" "$KNOWN_ISSUER"; do
+            for c in "$KEYS_DIR"/candidate*.pem; do
+              echo "Trying $(basename "$c") with issuer ${iss:0:8}…"
+              if KEY_PATH="$c" ASC_ISSUER_ID="$iss" ruby "$RUNNER_TEMP/jwt.rb"; then
+                cp "$c" "$KEYS_DIR/AuthKey_$ASC_KEY_ID.p8"
+                echo "KEY_PATH=$KEYS_DIR/AuthKey_$ASC_KEY_ID.p8" >> "$GITHUB_ENV"
+                echo "ASC_ISSUER_ID=$iss" >> "$GITHUB_ENV"
+                [ "$iss" != "$ASC_ISSUER_ID" ] && echo "::warning::The ASC_ISSUER_ID secret was wrong; used your account's Issuer ID 0c392542-… instead. Update the secret to that value."
+                exit 0
+              fi
+            done
+          done
+          echo "::error::None of the keys in ASC_KEY_CONTENT work with this Key ID ($(printf '%s' "$ASC_KEY_ID" | cut -c1-2)…) and Issuer ID. Check that ASC_KEY_ID is the new key's ID and ASC_ISSUER_ID is the Issuer ID above the Team Keys list."
+          exit 1
+
+      - name: Archive (signed)
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          xcodebuild -project SkiPDF.xcodeproj -scheme SkiPDF \
+            -configuration Release -destination 'generic/platform=iOS' \
+            -archivePath build/SkiPDF.xcarchive archive \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$KEY_PATH" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+            DEVELOPMENT_TEAM="$TEAM_ID" CODE_SIGN_STYLE=Automatic \
+            CURRENT_PROJECT_VERSION=${{ github.run_number }} > archive.log 2>&1 || {
+              grep -E "error:|Error " archive.log | sort -u | head -30 | while IFS= read -r line; do echo "::error::${line//$HOME/}"; done
+              tail -50 archive.log
+              exit 1
+            }
+
+      - name: Upload to TestFlight
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          cat > ExportOptions.plist <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>method</key><string>app-store-connect</string>
+            <key>destination</key><string>upload</string>
+            <key>teamID</key><string>$TEAM_ID</string>
+            <key>signingStyle</key><string>automatic</string>
+            <key>uploadSymbols</key><true/>
+            <key>manageAppVersionAndBuildNumber</key><false/>
+          </dict></plist>
+          PLIST
+          xcodebuild -exportArchive -archivePath build/SkiPDF.xcarchive \
+            -exportOptionsPlist ExportOptions.plist -exportPath build/export \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$KEY_PATH" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID" > export.log 2>&1 || {
+              grep -iE "error" export.log | sort -u | head -30 | while IFS= read -r line; do echo "::error::${line//$HOME/}"; done
+              tail -50 export.log
+              exit 1
+            }
+          echo "::notice::Build ${{ github.run_number }} uploaded to TestFlight. It appears in the TestFlight app after Apple finishes processing (usually 10–30 minutes)."
