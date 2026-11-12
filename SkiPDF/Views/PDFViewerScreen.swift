@@ -34,8 +34,10 @@ struct PDFViewerScreen: View {
                 if let doc = model.document, !doc.isLocked {
                     VStack(spacing: 0) {
                         PDFKitView(model: model)
-                        if model.showThumbnails {
+                            .ignoresSafeArea(edges: model.immersive ? .all : [])
+                        if model.showThumbnails && !model.immersive {
                             ThumbnailStrip(model: model).frame(height: 76)
+                                .transition(.move(edge: .bottom).combined(with: .opacity))
                         }
                     }
                 } else if model.document?.isLocked == true {
@@ -55,6 +57,11 @@ struct PDFViewerScreen: View {
                 }
             }
             .toolBackground()
+            // Zoomed in: hide every bar so the page fills the screen. Zoom back out (or tap) to bring them back.
+            .toolbar(model.immersive ? .hidden : .visible, for: .navigationBar)
+            .toolbar(model.immersive ? .hidden : .visible, for: .bottomBar)
+            .statusBarHidden(model.immersive)
+            .animation(.easeInOut(duration: 0.22), value: model.immersive)
             .navigationTitle(model.title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -97,7 +104,7 @@ struct PDFViewerScreen: View {
                 }
             }
             .safeAreaInset(edge: .top) {
-                if showSearch {
+                if showSearch && !model.immersive {
                     HStack {
                         TextField("Search in PDF", text: $searchText)
                             .textFieldStyle(.roundedBorder)
@@ -164,6 +171,8 @@ final class PDFViewerModel: ObservableObject {
     @Published var matches: [PDFSelection] = []
     @Published var matchIndex = 0
     @Published var searched = false
+    /// True while zoomed in past fit-to-width: bars are hidden.
+    @Published var immersive = false
 
     /// One PDF view for the screen, shared by the page view and the thumbnail strip.
     let pdfView: SizingPDFView = {
@@ -194,6 +203,12 @@ final class PDFViewerModel: ObservableObject {
             Task { @MainActor in self?.updatePageLabel() }
         })
         // Typing in form fields counts as an edit.
+        observers.append(NotificationCenter.default.addObserver(forName: .PDFViewScaleChanged, object: pdfView, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.zoomChanged() }
+        })
+        pdfView.onTap = { [weak self] in
+            Task { @MainActor in self?.tapped() }
+        }
         observers.append(NotificationCenter.default.addObserver(forName: .PDFViewAnnotationHit, object: pdfView, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.dirty = true }
         })
@@ -219,6 +234,21 @@ final class PDFViewerModel: ObservableObject {
         }
         wrongPassword = true
         return false
+    }
+
+    private var lastZoomed = false
+
+    func zoomChanged() {
+        let zoomed = pdfView.isZoomedIn
+        guard zoomed != lastZoomed else { return }
+        lastZoomed = zoomed
+        if immersive != zoomed { immersive = zoomed }
+    }
+
+    /// A tap while zoomed in shows or hides the bars without changing the zoom.
+    func tapped() {
+        guard pdfView.isZoomedIn else { return }
+        immersive.toggle()
     }
 
     func attach() {
@@ -383,24 +413,63 @@ struct PDFKitView: UIViewRepresentable {
 /// which otherwise leaves the pages invisible).
 final class SizingPDFView: PDFView {
     private var lastSize: CGSize = .zero
+    /// The scale that fits the page width at the current size.
+    private(set) var fitScale: CGFloat = 0
+    var onTap: (() -> Void)?
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
+        tap.cancelsTouchesInView = false
+        tap.delegate = self
+        addGestureRecognizer(tap)
+    }
+
+    required init?(coder: NSCoder) { super.init(coder: coder) }
+
+    /// Zoomed in noticeably past fit-to-width.
+    var isZoomedIn: Bool { fitScale > 0 && scaleFactor > fitScale * 1.08 }
 
     override func layoutSubviews() {
+        let wasZoomed = isZoomedIn
         super.layoutSubviews()
         guard bounds.width > 1, bounds.height > 1, bounds.size != lastSize else { return }
         lastSize = bounds.size
-        fitToWidth() // first layout, rotation, split view
+        if wasZoomed {
+            // Bars hid or showed while zoomed in: keep the zoom, just update what "fit" means.
+            updateFitScale()
+        } else {
+            fitToWidth() // first layout, rotation, bars coming back after zooming out
+        }
+    }
+
+    private func updateFitScale() {
+        autoScales = true
+        let fit = scaleFactorForSizeToFit
+        autoScales = false
+        if fit > 0 {
+            fitScale = fit
+            minScaleFactor = fit * 0.5
+            maxScaleFactor = max(fit * 8, 4)
+        }
     }
 
     func fitToWidth() {
         guard document != nil, bounds.width > 1 else { return }
-        autoScales = true
-        let fit = scaleFactorForSizeToFit
-        if fit > 0 {
-            minScaleFactor = fit * 0.5
-            maxScaleFactor = max(fit * 8, 4)
-            scaleFactor = fit
-        }
+        updateFitScale()
+        if fitScale > 0 { scaleFactor = fitScale }
     }
+
+    @objc private func handleTap(_ g: UITapGestureRecognizer) {
+        // Ignore taps on links and form fields.
+        let p = g.location(in: self)
+        if let page = page(for: p, nearest: false), page.annotation(at: convert(p, to: page)) != nil { return }
+        onTap?()
+    }
+}
+
+extension SizingPDFView: UIGestureRecognizerDelegate {
+    func gestureRecognizer(_ g: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
 }
 
 struct ThumbnailStrip: UIViewRepresentable {
