@@ -26,9 +26,8 @@ targets:
         NSCameraUsageDescription: Ski PDF uses the camera to scan paper documents into PDFs.
         NSPhotoLibraryAddUsageDescription: Ski PDF saves converted and edited images to your photo library.
         UIFileSharingEnabled: true
-        LSSupportsOpeningDocumentsInPlace: false
-        UISupportsDocumentBrowser: false
-        CFBundleDocumentTypes:
+        LSSupportsOpeningDocumentsInPlace: true
+                CFBundleDocumentTypes:
           - CFBundleTypeName: PDF Document
             CFBundleTypeRole: Editor
             LSHandlerRank: Alternate

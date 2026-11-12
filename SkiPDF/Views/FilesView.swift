@@ -10,7 +10,6 @@ struct FilesView: View {
     @State private var newName = ""
     @State private var deleting: LibraryFile?
     @State private var showImporter = false
-    @State private var exportURL: URL?
 
     enum Kind: String, CaseIterable, Identifiable {
         case all = "All", pdf = "PDFs", images = "Images", other = "Other"
@@ -83,9 +82,6 @@ struct FilesView: View {
             .confirmationDialog("Delete \(deleting?.name ?? "")?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }), titleVisibility: .visible) {
                 Button("Delete", role: .destructive) { if let f = deleting { library.delete(f) }; deleting = nil }
             }
-            .sheet(item: Binding(get: { exportURL.map { IdentURL(url: $0) } }, set: { exportURL = $0?.url })) { item in
-                ExportPicker(urls: [item.url])
-            }
         }
     }
 
@@ -93,7 +89,7 @@ struct FilesView: View {
     private func menu(_ f: LibraryFile) -> some View {
         Button { router.opened = f } label: { Label("Open", systemImage: "eye") }
         ShareLink(item: f.url) { Label("Share", systemImage: "square.and.arrow.up") }
-        Button { exportURL = f.url } label: { Label("Save to Files…", systemImage: "folder.badge.plus") }
+        Button { FilesExporter.present([f.url]) } label: { Label("Save to Files…", systemImage: "folder.badge.plus") }
         Button { startRename(f) } label: { Label("Rename", systemImage: "pencil") }
         Button { library.duplicate(f) } label: { Label("Duplicate", systemImage: "plus.square.on.square") }
         Button(role: .destructive) { deleting = f } label: { Label("Delete", systemImage: "trash") }

@@ -346,8 +346,6 @@ struct ResultSheet: View {
     let result: ToolResult
     @Environment(\.dismiss) var dismiss
     @State private var preview: LibraryFile?
-    @State private var exportURLs: [URL] = []
-    @State private var showExport = false
     @State private var photosMessage: String?
 
     var body: some View {
@@ -370,8 +368,7 @@ struct ResultSheet: View {
                         Label(result.files.count == 1 ? "Share" : "Share all", systemImage: "square.and.arrow.up")
                     }
                     Button {
-                        exportURLs = result.files.map(\.url)
-                        showExport = true
+                        FilesExporter.present(result.files.map(\.url))
                     } label: { Label("Save to Files…", systemImage: "folder.badge.plus") }
                     if !result.images.isEmpty {
                         Button {
@@ -386,7 +383,6 @@ struct ResultSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
             .fullScreenCover(item: $preview) { f in FileOpener(file: f) }
-            .sheet(isPresented: $showExport) { ExportPicker(urls: exportURLs) }
             .alert(photosMessage ?? "", isPresented: Binding(get: { photosMessage != nil }, set: { if !$0 { photosMessage = nil } })) {
                 Button("OK", role: .cancel) {}
             }
@@ -449,13 +445,26 @@ enum Thumbnails {
 
 // MARK: - System screens
 
-/// "Save to Files…" — lets the user pick a folder to copy files into.
-struct ExportPicker: UIViewControllerRepresentable {
-    let urls: [URL]
-    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
-        UIDocumentPickerViewController(forExporting: urls, asCopy: true)
+/// "Save to Files…" — lets the user pick a folder to copy files into. Presented straight from UIKit
+/// on top of whatever is showing, so the files are always handed over.
+enum FilesExporter {
+    @MainActor
+    static func present(_ urls: [URL]) {
+        let existing = urls.filter { FileManager.default.fileExists(atPath: $0.path) }
+        guard !existing.isEmpty else { return }
+        let picker = UIDocumentPickerViewController(forExporting: existing, asCopy: true)
+        picker.shouldShowFileExtensions = true
+        topViewController()?.present(picker, animated: true)
     }
-    func updateUIViewController(_ vc: UIDocumentPickerViewController, context: Context) {}
+
+    @MainActor
+    static func topViewController() -> UIViewController? {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let window = scenes.flatMap(\.windows).first { $0.isKeyWindow } ?? scenes.first?.windows.first
+        var top = window?.rootViewController
+        while let next = top?.presentedViewController, !next.isBeingDismissed { top = next }
+        return top
+    }
 }
 
 struct QuickLookScreen: View {
